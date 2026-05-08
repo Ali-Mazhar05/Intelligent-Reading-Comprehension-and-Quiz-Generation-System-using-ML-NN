@@ -1,7 +1,6 @@
 AL2002_LabProject.pdf
 pdf_text.txt
 extract_pdf.py
-requirements.txt
 data/
 models/
 __pycache__/
