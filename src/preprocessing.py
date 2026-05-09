@@ -58,12 +58,13 @@ class FeatureEngineer:
         # flag to enable tf idf vectorization
         self.use_tf_idf = use_tf_idf
         
+        # limit vocabulary to top 10k words to prevent ram exhaustion
         # initialize count vectorizer for one hot encoding
-        self.count_vectorizer = CountVectorizer(binary=True)
+        self.count_vectorizer = CountVectorizer(binary=True, max_features=10000)
         
         # initialize tf idf vectorizer if enabled
         if self.use_tf_idf:
-            self.tf_idf_vectorizer = TfidfVectorizer()
+            self.tf_idf_vectorizer = TfidfVectorizer(max_features=10000)
     
     def fit_transform_corpus(self, corpus):
         # fit and transform corpus using count vectorizer
@@ -118,17 +119,21 @@ class FeatureEngineer:
             with open(os.path.join(load_directory, 'tf_idf_vectorizer.pkl'), 'rb') as file:
                 self.tf_idf_vectorizer = pickle.load(file)
 
+from sklearn.model_selection import train_test_split
+
 def process_and_save_datasets():
     # define file paths for raw data
     train_path = 'data/raw/train.csv'
-    dev_path = 'data/raw/dev.csv'
-    test_path = 'data/raw/test.csv'
     
-    # load datasets into dataframes
-    print("loading datasets...")
-    train_df = load_data(train_path)
-    dev_df = load_data(dev_path)
-    test_df = load_data(test_path)
+    # load dataset into dataframe
+    print("loading dataset...")
+    full_df = load_data(train_path)
+    
+    print("splitting dataset into train, dev, and test sets...")
+    # split 80% train, 20% temp
+    train_df, temp_df = train_test_split(full_df, test_size=0.2, random_state=42)
+    # split temp into 10% dev, 10% test
+    dev_df, test_df = train_test_split(temp_df, test_size=0.5, random_state=42)
     
     # preprocess dataframes to clean text
     print("preprocessing datasets...")

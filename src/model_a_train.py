@@ -4,10 +4,10 @@ import os
 import pickle
 import re
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
+from sklearn.svm import LinearSVC
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.cluster import KMeans
+from sklearn.cluster import MiniBatchKMeans
 import nltk
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from nltk.translate.meteor_score import single_meteor_score
@@ -91,15 +91,16 @@ def train_and_evaluate_models():
     feature_engineer.load_models()
     
     print("loading clean datasets...")
-    train_df = load_data('data/processed/train_clean.csv').head(2000)
-    dev_df = load_data('data/processed/dev_clean.csv').head(500)
+    train_df = load_data('data/processed/train_clean.csv')
+    dev_df = load_data('data/processed/dev_clean.csv')
     
     # --- unsupervised component: k-means clustering ---
     print("running unsupervised k-means clustering on qa pairs...")
     qa_corpus = (train_df['clean_question'].fillna('') + ' ' + train_df['clean_a'].fillna('')).tolist()
     qa_features, _ = feature_engineer.transform_corpus(qa_corpus)
     
-    kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
+    # minibatchkmeans uses far less memory than standard kmeans
+    kmeans = MiniBatchKMeans(n_clusters=5, random_state=42, n_init=3, batch_size=2048)
     kmeans.fit(qa_features)
     print("k-means clustering complete.")
     
@@ -107,10 +108,15 @@ def train_and_evaluate_models():
     x_train, y_train = prepare_verification_features(train_df, feature_engineer)
     
     print("training 4 traditional supervised models (lr, svm, nb, rf)...")
-    log_reg = LogisticRegression(max_iter=1000)
-    svm_model = SVC(kernel='linear', probability=True, max_iter=1000)
+    log_reg = LogisticRegression(max_iter=1000, n_jobs=-1)
+    
+    # linearsvc scales linearly with large datasets unlike standard svc
+    svm_model = LinearSVC(max_iter=1000, dual="auto")
+    
     nb_model = MultinomialNB()
-    rf_model = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
+    
+    # limit depth and use parallel jobs to save ram and time
+    rf_model = RandomForestClassifier(n_estimators=20, max_depth=10, n_jobs=-1, random_state=42)
     
     log_reg.fit(x_train, y_train)
     svm_model.fit(x_train, y_train)
