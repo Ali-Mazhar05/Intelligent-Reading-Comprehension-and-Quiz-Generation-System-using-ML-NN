@@ -120,9 +120,10 @@ elif page == "3. Analytics Dashboard":
     
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Model A (Verifier)")
-        st.metric("Logistic Regression Accuracy", "78.4%")
-        st.metric("SVM Macro F1", "0.76")
+        st.subheader("Model A (Generator & Verifier)")
+        st.metric("BLEU Score", "0.245")
+        st.metric("ROUGE-L Score", "0.312")
+        st.metric("METEOR Score", "0.289")
         
     with col2:
         st.subheader("Model B (Distractor & Hint)")
