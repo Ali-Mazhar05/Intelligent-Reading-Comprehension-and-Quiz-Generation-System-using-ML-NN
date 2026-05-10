@@ -9,6 +9,7 @@ from sklearn.svm import LinearSVC
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.mixture import GaussianMixture
 from sklearn.semi_supervised import LabelPropagation
 from sklearn.calibration import CalibratedClassifierCV
 import nltk
@@ -17,6 +18,7 @@ from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from nltk.translate.meteor_score import single_meteor_score
 from rouge_score import rouge_scorer
 from preprocessing import load_data, FeatureEngineer
+from model_b_train import DistractorGenerator, HintGenerator
 
 # ensure nltk resources are available
 try:
@@ -243,6 +245,17 @@ def train_and_evaluate_models():
     kmeans.fit(qa_features)
     print("k-means clustering complete.")
     
+    # --- unsupervised component: gaussian mixture model (GMM) ---
+    print("running unsupervised gmm on qa pairs...")
+    # gmm is memory intensive on sparse data, use a dense subset
+    gmm_subset_size = min(5000, qa_features.shape[0])
+    gmm_indices = np.random.choice(qa_features.shape[0], gmm_subset_size, replace=False)
+    x_gmm = qa_features[gmm_indices].toarray()
+    
+    gmm = GaussianMixture(n_components=5, random_state=42)
+    gmm.fit(x_gmm)
+    print("gmm clustering complete.")
+    
     # --- supervised components: 4 traditional models ---
     x_train, y_train = prepare_verification_features(train_df, feature_engineer)
     
@@ -276,6 +289,8 @@ def train_and_evaluate_models():
         pickle.dump(rf_model, f)
     with open('models/model_a/traditional/kmeans.pkl', 'wb') as f:
         pickle.dump(kmeans, f)
+    with open('models/model_a/traditional/gmm.pkl', 'wb') as f:
+        pickle.dump(gmm, f)
 
     # --- semi-supervised component: label propagation ---
     print("running semi-supervised label propagation on subset...")
@@ -356,10 +371,14 @@ def train_and_evaluate_models():
     # Load the trained distractor generator with ranker from disk if available
     dist_gen_path = 'models/model_b/traditional/distractor_generator.pkl'
     if os.path.exists(dist_gen_path):
+        # ensure DistractorGenerator is in __main__ for the pickle loader
+        import sys
+        import __main__
+        __main__.DistractorGenerator = DistractorGenerator
+        
         with open(dist_gen_path, 'rb') as f:
             dist_gen = pickle.load(f)
     else:
-        from model_b_train import DistractorGenerator
         dist_gen = DistractorGenerator(feature_engineer)
         
     dist_success_count = 0
