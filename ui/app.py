@@ -56,6 +56,8 @@ if "article" not in st.session_state:
     st.session_state.correct_answer = ""
     st.session_state.distractors = []
     st.session_state.hints = []
+    st.session_state.hints_revealed = 0
+    st.session_state.answer_revealed = False
 
 if page == "1. Input View":
     st.header("Step 1: Input Article")
@@ -67,6 +69,8 @@ if page == "1. Input View":
     if st.button("Generate Quiz & Hints"):
         if article_input:
             st.session_state.article = article_input
+            st.session_state.hints_revealed = 0
+            st.session_state.answer_revealed = False
             
             with st.spinner("Model A is generating the question and correct answer..."):
                 # we need to initialize a question generator
@@ -121,10 +125,27 @@ elif page == "2. Quiz & Hints View":
                     
         with col2:
             st.subheader("💡 Hint Panel")
-            # display graduated hints
-            for i, hint in enumerate(st.session_state.hints):
-                with st.expander(f"Hint {i+1}"):
-                    st.write(hint)
+            
+            # display revealed hints
+            for i in range(st.session_state.hints_revealed):
+                if i < len(st.session_state.hints):
+                    st.info(f"**Hint {i+1}:** {st.session_state.hints[i]}")
+            
+            # reveal next hint button
+            if st.session_state.hints_revealed < len(st.session_state.hints):
+                if st.button(f"Reveal Hint {st.session_state.hints_revealed + 1}"):
+                    st.session_state.hints_revealed += 1
+                    st.rerun()
+            
+            # reveal answer button (only after all hints)
+            elif not st.session_state.answer_revealed:
+                if st.button("Reveal Answer"):
+                    st.session_state.answer_revealed = True
+                    st.rerun()
+            
+            # display answer if revealed
+            if st.session_state.answer_revealed:
+                st.success(f"**Final Answer:** {st.session_state.correct_answer}")
 
 elif page == "3. Analytics Dashboard":
     st.header("Step 3: Analytics & Model Performance")
