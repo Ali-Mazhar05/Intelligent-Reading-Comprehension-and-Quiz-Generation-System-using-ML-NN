@@ -8,3 +8,4 @@ streamlit==1.32.2
 PyPDF2==3.0.1
 nltk==3.9.4
 rouge-score==0.1.2
+tqdm==4.66.2

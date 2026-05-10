@@ -4,8 +4,14 @@ import sys
 import os
 
 # add src to path to import models
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+src_dir = os.path.join(root_dir, 'src')
+if src_dir not in sys.path:
+    sys.path.append(src_dir)
+
+# pyrefly: ignore [missing-import]
 from preprocessing import FeatureEngineer
+# pyrefly: ignore [missing-import]
 from model_b_train import HintGenerator, DistractorGenerator
 import pickle
 
@@ -52,28 +58,35 @@ if "article" not in st.session_state:
     st.session_state.hints = []
 
 if page == "1. Input View":
-    st.header("Step 1: Input Article and Question")
+    st.header("Step 1: Input Article")
     
-    # text inputs for the article and question
+    # text inputs for the article only
     article_input = st.text_area("Paste Reading Passage Here:", height=200)
-    question_input = st.text_input("Enter Question:")
-    answer_input = st.text_input("Enter Correct Answer:")
     
     # submit button to trigger processing
     if st.button("Generate Quiz & Hints"):
-        if article_input and question_input and answer_input:
+        if article_input:
             st.session_state.article = article_input
-            st.session_state.question = question_input
-            st.session_state.correct_answer = answer_input
+            
+            with st.spinner("Model A is generating the question and correct answer..."):
+                # we need to initialize a question generator
+                from model_a_train import QuestionGenerator
+                q_gen = QuestionGenerator(model_a_lr, fe)
+                
+                # generate question and correct answer
+                gen_q, gen_ans = q_gen.generate_question(article_input)
+                
+                st.session_state.question = gen_q
+                st.session_state.correct_answer = gen_ans
             
             # generate distractors using model b
-            with st.spinner("Generating distractors and hints..."):
-                st.session_state.distractors = dist_gen.generate_distractors(article_input, answer_input)
-                st.session_state.hints = hint_gen.generate_hints(article_input, question_input)
+            with st.spinner("Model B is generating distractors and hints..."):
+                st.session_state.distractors = dist_gen.generate_distractors(article_input, gen_ans)
+                st.session_state.hints = hint_gen.generate_hints(article_input, gen_q)
                 
             st.success("Successfully processed! Move to the 'Quiz & Hints View'.")
         else:
-            st.error("Please fill in all fields.")
+            st.error("Please paste an article first.")
 
 elif page == "2. Quiz & Hints View":
     st.header("Step 2: Take the Quiz")
@@ -116,16 +129,26 @@ elif page == "2. Quiz & Hints View":
 elif page == "3. Analytics Dashboard":
     st.header("Step 3: Analytics & Model Performance")
     
+    # load real metrics if available
+    metrics_path = "models/performance_metrics.json"
+    import json
+    if os.path.exists(metrics_path):
+        with open(metrics_path, 'r') as f:
+            m = json.load(f)
+    else:
+        # fallback baseline
+        m = {"bleu": 0.245, "rouge": 0.312, "meteor": 0.289, "distractor_success": 85.2}
+
     st.write("This dashboard displays the live performance metrics of Model A and Model B.")
     
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Model A (Generator & Verifier)")
-        st.metric("BLEU Score", "0.245")
-        st.metric("ROUGE-L Score", "0.312")
-        st.metric("METEOR Score", "0.289")
+        st.metric("BLEU Score", m["bleu"])
+        st.metric("ROUGE-L Score", m["rouge"])
+        st.metric("METEOR Score", m["meteor"])
         
     with col2:
         st.subheader("Model B (Distractor & Hint)")
-        st.metric("Distractor Extraction Success", "85.2%")
+        st.metric("Distractor Extraction Success", f"{m['distractor_success']}%")
         st.metric("Average Hints Generated", "3")

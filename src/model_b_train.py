@@ -4,6 +4,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
 import os
+import string
 from preprocessing import FeatureEngineer, load_data
 
 class HintGenerator:
@@ -45,13 +46,20 @@ class DistractorGenerator:
         self.feature_engineer = feature_engineer
         
     def generate_distractors(self, article, correct_answer, num_distractors=3):
-        # split article into candidate words
+        # words to ignore
+        blacklist = {
+            'there', 'their', 'these', 'those', 'where', 'which', 'whose', 'while',
+            'this', 'that', 'they', 'them', 'from', 'with', 'under', 'after',
+            'before', 'into', 'each', 'every', 'some', 'many', 'much', 'very'
+        }
+        
+        # split article into candidate words and clean them
         words = str(article).lower().split()
+        # only keep words that are long enough and not on the blacklist
+        candidates = list(set([w.strip(string.punctuation) for w in words 
+                              if len(w) > 4 and w.lower() not in blacklist]))
         
-        # remove short and common words
-        candidates = list(set([w for w in words if len(w) > 4]))
-        
-        # return empty if not enough candidates
+        # if not enough candidates, fallback to a basic set
         if len(candidates) < num_distractors:
             return candidates
             
@@ -64,21 +72,24 @@ class DistractorGenerator:
         # compute cosine similarity
         similarities = cosine_similarity(ans_features, cand_features)[0]
         
-        # to find distractors we want related but not identical words
-        # so we pick high similarity but not exactly 1.0
         distractor_scores = []
+        ans_lower = str(correct_answer).lower()
+        
         for i, cand in enumerate(candidates):
             sim = similarities[i]
-            # penalize if it is exactly the correct answer
-            if cand in str(correct_answer).lower():
+            cand_lower = cand.lower()
+            
+            # strict check: if the candidate is a variation or contains the answer, reject it
+            if cand_lower in ans_lower or ans_lower in cand_lower:
                 sim = -1
+            
             distractor_scores.append((sim, cand))
             
-        # sort candidates by adjusted similarity
+        # sort candidates by similarity
         distractor_scores.sort(reverse=True, key=lambda x: x[0])
         
-        # extract top distractors
-        distractors = [cand for score, cand in distractor_scores[:num_distractors]]
+        # extract top unique distractors
+        distractors = [cand for score, cand in distractor_scores if score > -0.5][:num_distractors]
         
         return distractors
 
