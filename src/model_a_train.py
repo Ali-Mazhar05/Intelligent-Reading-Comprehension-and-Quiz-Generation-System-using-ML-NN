@@ -7,8 +7,10 @@ import string
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
 from sklearn.naive_bayes import MultinomialNB
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.semi_supervised import LabelPropagation
+from sklearn.calibration import CalibratedClassifierCV
 import nltk
 from tqdm import tqdm
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
@@ -44,47 +46,77 @@ class QuestionGenerator:
         valid_sentences = [s for s in sentences if len(s.split()) > 6]
         if not valid_sentences:
             valid_sentences = sentences
+            
+        candidates = []
         
-        # if no correct answer, select one using improved heuristics
+        # Generation Step: Extract potential entities/answers and create question candidates
         if not correct_answer:
-            # try to find a capitalized word that is NOT at the start of a sentence
-            best_entities = []
+            # find multiple capitalized words as candidates
+            potential_entities = []
             for s in valid_sentences:
-                # find capitalized words that are preceded by a space (not at start of string)
                 mid_sentence_entities = re.findall(r' [A-Z][a-z]+\b', s)
                 for ent in mid_sentence_entities:
                     clean_ent = ent.strip().strip(string.punctuation)
                     if clean_ent.lower() not in blacklist and len(clean_ent) > 3:
-                        best_entities.append(clean_ent)
+                        potential_entities.append((clean_ent, s))
             
-            if best_entities:
-                correct_answer = best_entities[0]
-                # find the specific sentence this entity came from
+            # if few entities, add some long nouns
+            if len(potential_entities) < 3:
                 for s in valid_sentences:
-                    if correct_answer in s:
-                        target_sentence = s
-                        break
-            else:
-                # fallback: just pick a long noun-like word from the first valid sentence
-                target_sentence = valid_sentences[0]
-                words = target_sentence.split()
-                long_words = [w.strip(string.punctuation) for w in words if len(w) > 5 and w.lower() not in blacklist]
-                correct_answer = long_words[0] if long_words else words[0]
+                    words = s.split()
+                    for w in words:
+                        cw = w.strip(string.punctuation)
+                        if len(cw) > 6 and cw.lower() not in blacklist:
+                            potential_entities.append((cw, s))
+            
+            # Create candidates
+            for ent, sent in potential_entities[:10]: # limit to top 10 for ranking
+                candidates.append(self._create_question(ent, sent))
         else:
-            # find the sentence that best matches the given correct answer
+            # if correct_answer is fixed, find the best sentence match
             ans_words = set(str(correct_answer).lower().split())
-            target_sentence = valid_sentences[0]
+            best_sent = valid_sentences[0]
             max_overlap = -1
             for sentence in valid_sentences:
                 sent_words = set(sentence.lower().split())
                 overlap = len(ans_words.intersection(sent_words))
                 if overlap > max_overlap:
                     max_overlap = overlap
-                    target_sentence = sentence
-        
-        # final cleaning
-        clean_answer = str(correct_answer).strip(string.punctuation)
-        
+                    best_sent = sentence
+            candidates.append(self._create_question(correct_answer, best_sent))
+            
+        if not candidates:
+            return "What is the main idea of this passage?", "Information"
+
+        # Ranking Step: Use the ML Ranker (SVM/Ensemble) to score candidates
+        if len(candidates) > 1 and self.ranker_model:
+            ranked_candidates = []
+            for q, a in candidates:
+                # use verifier as a proxy for ranking: how confident is it that 'a' is the answer to 'q'?
+                combined = f"{article} {q} {a}"
+                feats, _ = self.feature_engineer.transform_corpus([combined])
+                
+                # if model has predict_proba (like Voting or calibrated SVM)
+                if hasattr(self.ranker_model, "predict_proba"):
+                    score = self.ranker_model.predict_proba(feats)[0][1]
+                else:
+                    # fallback for LinearSVC: use decision function
+                    try:
+                        score = self.ranker_model.decision_function(feats)[0]
+                    except:
+                        score = 0
+                
+                ranked_candidates.append((score, q, a))
+            
+            # sort by score descending
+            ranked_candidates.sort(key=lambda x: x[0], reverse=True)
+            _, best_q, best_a = ranked_candidates[0]
+            return best_q, best_a
+            
+        return candidates[0]
+
+    def _create_question(self, clean_answer, target_sentence):
+        clean_answer = str(clean_answer).strip(string.punctuation)
         # determine wh-word based on what type of entity the answer is
         if re.match(r'^\d{4}$', clean_answer):
             wh_phrase = f"When did the events regarding \"{clean_answer}\" occur?"
@@ -94,8 +126,8 @@ class QuestionGenerator:
             wh_phrase = f"Who is \"{clean_answer}\" as described in the passage?"
         else:
             wh_phrase = f"What is mentioned in the passage about \"{clean_answer}\"?"
-        
         return wh_phrase, clean_answer
+
 
 class FITBGenerator:
     def __init__(self, feature_engineer):
@@ -244,22 +276,95 @@ def train_and_evaluate_models():
         pickle.dump(rf_model, f)
     with open('models/model_a/traditional/kmeans.pkl', 'wb') as f:
         pickle.dump(kmeans, f)
+
+    # --- semi-supervised component: label propagation ---
+    print("running semi-supervised label propagation on subset...")
+    # label propagation is memory intensive, using a smaller subset (e.g. 2000 samples)
+    lp_subset_size = min(2000, x_train.shape[0])
+    x_lp_subset = x_train[:lp_subset_size].toarray() # convert to dense for label propagation
+    y_lp_subset = y_train[:lp_subset_size].copy()
+    
+    # simulate unlabelled data by setting 30% of labels to -1
+    rng = np.random.RandomState(42)
+    random_unlabeled_points = rng.rand(len(y_lp_subset)) < 0.3
+    y_lp_subset[random_unlabeled_points] = -1
+    
+    lp_model = LabelPropagation(kernel='knn', n_neighbors=7)
+    lp_model.fit(x_lp_subset, y_lp_subset)
+    print("label propagation complete.")
+    
+    with open('models/model_a/traditional/label_propagation.pkl', 'wb') as f:
+        pickle.dump(lp_model, f)
+
+    # --- ensemble strategy: soft voting classifier ---
+    print("creating ensemble voting classifier...")
+    # linearSVC doesn't have predict_proba, so we wrap it in calibration
+    calibrated_svm = CalibratedClassifierCV(LinearSVC(max_iter=1000, dual="auto"), cv=3)
+    
+    ensemble_model = VotingClassifier(
+        estimators=[
+            ('lr', log_reg),
+            ('svm', calibrated_svm),
+            ('nb', nb_model),
+            ('rf', rf_model)
+        ],
+        voting='soft'
+    )
+    # fit on a subset for speed
+    ensemble_subset_x, ensemble_subset_y = x_train[:15000], y_train[:15000]
+    ensemble_model.fit(ensemble_subset_x, ensemble_subset_y)
+    print("ensemble training complete.")
+    
+    # --- real metric calculation for verification ---
+    from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
+    x_dev, y_dev = prepare_verification_features(dev_df, feature_engineer)
+    
+    print("evaluating ensemble on dev set...")
+    y_pred = ensemble_model.predict(x_dev)
+    ens_acc = accuracy_score(y_dev, y_pred)
+    ens_f1 = f1_score(y_dev, y_pred, average='macro')
+    cm = confusion_matrix(y_dev, y_pred)
+    
+    print(f"ensemble accuracy: {ens_acc:.4f}")
+    print(f"ensemble macro f1: {ens_f1:.4f}")
+    
+    lp_f1 = 0
+    if 'lp_model' in locals():
+        # evaluate label propagation on its own subset (dense)
+        y_lp_pred = lp_model.predict(x_lp_subset)
+        lp_f1 = f1_score(y_lp_subset[y_lp_subset != -1], y_lp_pred[y_lp_subset != -1], average='macro')
+        print(f"label propagation f1: {lp_f1:.4f}")
+
+    with open('models/model_a/traditional/ensemble_model.pkl', 'wb') as f:
+        pickle.dump(ensemble_model, f)
         
     # --- generation component: evaluate using nlp generation metrics ---
     print("\nevaluating question generation using bleu, rouge, and meteor...")
-    q_gen = QuestionGenerator(svm_model, feature_engineer)
+    # use the ensemble as the ranker for question generation
+    q_gen = QuestionGenerator(ensemble_model, feature_engineer)
     scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
     smooth = SmoothingFunction().method1
     
     bleu_scores = []
     rouge_scores = []
     meteor_scores = []
+    em_scores = []
     
     # --- model evaluation ---
-    eval_subset = dev_df.dropna(subset=['article', 'question', 'answer'])
-    from model_b_train import DistractorGenerator
-    dist_gen = DistractorGenerator(feature_engineer)
+    eval_subset = dev_df.dropna(subset=['article', 'question', 'answer', 'A', 'B', 'C', 'D'])
+    
+    # Load the trained distractor generator with ranker from disk if available
+    dist_gen_path = 'models/model_b/traditional/distractor_generator.pkl'
+    if os.path.exists(dist_gen_path):
+        with open(dist_gen_path, 'rb') as f:
+            dist_gen = pickle.load(f)
+    else:
+        from model_b_train import DistractorGenerator
+        dist_gen = DistractorGenerator(feature_engineer)
+        
     dist_success_count = 0
+    dist_precisions = []
+    dist_recalls = []
     
     print(f"starting generation evaluation on {len(eval_subset)} samples...")
     for _, row in tqdm(eval_subset.iterrows(), total=len(eval_subset), desc="Evaluating Models"):
@@ -273,7 +378,7 @@ def train_and_evaluate_models():
         else:
             continue
             
-        # evaluate model a
+        # 1. evaluate model a (Question Generation)
         gen_question, gen_ans = q_gen.generate_question(article, correct_ans_text)
         
         # compute bleu
@@ -292,22 +397,49 @@ def train_and_evaluate_models():
             meteor_scores.append(meteor)
         except Exception:
             pass
+
+        # compute exact match (EM) - strict character-level match to gold answer
+        em = 1 if str(gen_ans).lower().strip() == str(correct_ans_text).lower().strip() else 0
+        em_scores.append(em)
             
-        # evaluate model b
-        distractors = dist_gen.generate_distractors(article, gen_ans)
-        # success if we got 3 unique distractors and none are the correct answer
-        if len(set(distractors)) == 3 and gen_ans.lower() not in [d.lower() for d in distractors]:
+        # 2. evaluate model b (Distractor Generation)
+        # Gold distractors from dataset
+        gold_distractors = {str(row[c]).lower().strip() for c in ['A', 'B', 'C', 'D'] if c != ans_char}
+        
+        # Predicted distractors from model
+        pred_distractors = dist_gen.generate_distractors(article, gen_ans)
+        pred_distractors_set = {str(d).lower().strip() for d in pred_distractors}
+        
+        # Success Rate (Metric for robustness)
+        if len(set(pred_distractors)) == 3 and gen_ans.lower() not in [d.lower() for d in pred_distractors]:
             dist_success_count += 1
+            
+        # Precision/Recall (Metric for alignment with human distractors)
+        intersection = gold_distractors.intersection(pred_distractors_set)
+        precision = len(intersection) / len(pred_distractors_set) if pred_distractors_set else 0
+        recall = len(intersection) / len(gold_distractors) if gold_distractors else 0
+        
+        dist_precisions.append(precision)
+        dist_recalls.append(recall)
             
     avg_bleu = np.mean(bleu_scores) if bleu_scores else 0
     avg_rouge = np.mean(rouge_scores) if rouge_scores else 0
     avg_meteor = np.mean(meteor_scores) if meteor_scores else 0
+    avg_em = np.mean(em_scores) if em_scores else 0
     dist_success_rate = (dist_success_count / len(eval_subset)) * 100 if len(eval_subset) > 0 else 0
+    
+    avg_dist_precision = np.mean(dist_precisions) if dist_precisions else 0
+    avg_dist_recall = np.mean(dist_recalls) if dist_recalls else 0
+    avg_dist_f1 = 2 * (avg_dist_precision * avg_dist_recall) / (avg_dist_precision + avg_dist_recall) if (avg_dist_precision + avg_dist_recall) > 0 else 0
     
     print(f"average bleu score: {avg_bleu:.4f}")
     print(f"average rouge-l score: {avg_rouge:.4f}")
     print(f"average meteor score: {avg_meteor:.4f}")
+    print(f"average exact match: {avg_em:.4f}")
     print(f"distractor extraction success: {dist_success_rate:.2f}%")
+    print(f"distractor precision: {avg_dist_precision:.4f}")
+    print(f"distractor recall: {avg_dist_recall:.4f}")
+    print(f"distractor f1: {avg_dist_f1:.4f}")
     
     # save metrics to json for the ui dashboard
     import json
@@ -315,7 +447,15 @@ def train_and_evaluate_models():
         "bleu": round(float(avg_bleu), 4),
         "rouge": round(float(avg_rouge), 4),
         "meteor": round(float(avg_meteor), 4),
-        "distractor_success": round(dist_success_rate, 2)
+        "exact_match": round(float(avg_em), 4),
+        "distractor_success": round(dist_success_rate, 2),
+        "distractor_precision": round(float(avg_dist_precision), 4),
+        "distractor_recall": round(float(avg_dist_recall), 4),
+        "distractor_f1": round(float(avg_dist_f1), 4),
+        "ensemble_accuracy": round(float(ens_acc), 4),
+        "ensemble_f1": round(float(ens_f1), 4),
+        "semi_supervised_f1": round(float(lp_f1), 4),
+        "confusion_matrix": cm.tolist()
     }
     os.makedirs('models', exist_ok=True)
     with open('models/performance_metrics.json', 'w') as f:
