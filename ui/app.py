@@ -49,6 +49,9 @@ st.title("📚 Intelligent Reading Comprehension & Quiz System")
 # sidebar for navigation
 page = st.sidebar.radio("Navigation", ["1. Input View", "2. Quiz & Hints View", "3. Analytics Dashboard"])
 
+# quiz mode toggle (only visible in relevant views)
+quiz_mode = st.sidebar.radio("Quiz Mode", ["Multiple Choice Wh-Q", "Fill in the Blank MCQ"])
+
 # state management for quiz
 if "article" not in st.session_state:
     st.session_state.article = ""
@@ -58,6 +61,7 @@ if "article" not in st.session_state:
     st.session_state.hints = []
     st.session_state.hints_revealed = 0
     st.session_state.answer_revealed = False
+    st.session_state.quiz_mode = "Multiple Choice Wh-Q"
 
 if page == "1. Input View":
     st.header("Step 1: Input Article")
@@ -71,21 +75,27 @@ if page == "1. Input View":
             st.session_state.article = article_input
             st.session_state.hints_revealed = 0
             st.session_state.answer_revealed = False
+            st.session_state.quiz_mode = quiz_mode
             
-            with st.spinner("Model A is generating the question and correct answer..."):
-                # we need to initialize a question generator
-                from model_a_train import QuestionGenerator
-                q_gen = QuestionGenerator(model_a_lr, fe)
-                
-                # generate question and correct answer
-                gen_q, gen_ans = q_gen.generate_question(article_input)
+            with st.spinner(f"Model A is generating the {quiz_mode}..."):
+                if quiz_mode == "Multiple Choice Wh-Q":
+                    from model_a_train import QuestionGenerator
+                    q_gen = QuestionGenerator(model_a_lr, fe)
+                    gen_q, gen_ans = q_gen.generate_question(article_input)
+                else:
+                    from model_a_train import FITBGenerator
+                    fitb_gen = FITBGenerator(fe)
+                    gen_q, gen_ans = fitb_gen.generate_fitb_question(article_input)
                 
                 st.session_state.question = gen_q
                 st.session_state.correct_answer = gen_ans
             
             # generate distractors using model b
             with st.spinner("Model B is generating distractors and hints..."):
-                st.session_state.distractors = dist_gen.generate_distractors(article_input, gen_ans)
+                if quiz_mode == "Multiple Choice Wh-Q":
+                    st.session_state.distractors = dist_gen.generate_distractors(article_input, gen_ans)
+                else:
+                    st.session_state.distractors = dist_gen.generate_fitb_distractors(article_input, gen_ans)
                 st.session_state.hints = hint_gen.generate_hints(article_input, gen_q)
                 
             st.success("Successfully processed! Move to the 'Quiz & Hints View'.")

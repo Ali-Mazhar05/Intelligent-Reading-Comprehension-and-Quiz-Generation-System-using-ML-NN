@@ -97,6 +97,69 @@ class QuestionGenerator:
         
         return wh_phrase, clean_answer
 
+class FITBGenerator:
+    def __init__(self, feature_engineer):
+        self.feature_engineer = feature_engineer
+        
+    def generate_fitb_question(self, article):
+        import re
+        import string
+        import numpy as np
+        
+        # split into sentences
+        sentences = re.split(r'(?<=[.!?]) +', str(article))
+        valid_sentences = [s for s in sentences if len(s.split()) > 8 and len(s.split()) < 25]
+        
+        if not valid_sentences:
+            valid_sentences = sentences
+            
+        # words to ignore
+        blacklist = {
+            'there', 'their', 'these', 'those', 'where', 'which', 'whose', 'while',
+            'this', 'that', 'they', 'them', 'from', 'with', 'under', 'after',
+            'before', 'into', 'each', 'every', 'some', 'many', 'much', 'very',
+            'when', 'what', 'then', 'than', 'just', 'more', 'also', 'only'
+        }
+        
+        # pick a sentence from the middle-ish to avoid intros/outros
+        target_idx = len(valid_sentences) // 2
+        target_sentence = valid_sentences[target_idx]
+        
+        # tokenize and find potential blanks using OHE significance
+        words = target_sentence.split()
+        potential_blanks = []
+        
+        # get vocabulary to check OHE significance
+        vocab = self.feature_engineer.count_vectorizer.vocabulary_
+        
+        for i, word in enumerate(words):
+            clean_word = word.strip(string.punctuation)
+            if len(clean_word) > 4 and clean_word.lower() not in blacklist:
+                # check if word is in our OHE vocabulary (The Intelligence Gate)
+                if clean_word.lower() in vocab:
+                    potential_blanks.append((clean_word, i))
+        
+        if not potential_blanks:
+            # fallback to any long word
+            for i, word in enumerate(words):
+                clean_word = word.strip(string.punctuation)
+                if len(clean_word) > 3:
+                    potential_blanks.append((clean_word, i))
+        
+        # pick the word that is most 'central' to the sentence (heuristic for subject/object)
+        # we pick the one closest to the middle of the sentence
+        mid_p = len(words) // 2
+        potential_blanks.sort(key=lambda x: abs(x[1] - mid_p))
+        
+        target_word, target_pos = potential_blanks[0]
+        
+        # create masked sentence
+        masked_words = list(words)
+        masked_words[target_pos] = "__________"
+        masked_sentence = " ".join(masked_words)
+        
+        return masked_sentence, target_word
+
 def prepare_verification_features(df, feature_engineer):
     # drop rows with missing values
     df = df.dropna(subset=['clean_article', 'clean_question', 'clean_a', 'clean_b', 'clean_c', 'clean_d', 'answer'])

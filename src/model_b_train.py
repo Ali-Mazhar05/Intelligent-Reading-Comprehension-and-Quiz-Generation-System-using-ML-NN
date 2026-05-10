@@ -92,6 +92,10 @@ class DistractorGenerator:
         distractors = [cand for score, cand in distractor_scores if score > -0.5][:num_distractors]
         
         return distractors
+        
+    def generate_fitb_distractors(self, article, target_word, num_distractors=3):
+        # reuse the distractor logic but specifically for a single word
+        return self.generate_distractors(article, target_word, num_distractors)
 
 def train_and_save_model_b():
     # initialize and load feature engineer
